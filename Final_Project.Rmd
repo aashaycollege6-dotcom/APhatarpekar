@@ -1,0 +1,918 @@
+---
+title: "Forecasting US Housing Construction"
+author: "Aashay Phatarpekar"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Introduction
+
+ Housing affordability is a widespread problem in the United States. Many Americans find homeownership prohibitively expensive. A key part of the American dream is out of reach for a sizable proportion of the population. Driving these high prices is a failure to build enough homes to meet demand. Forecasting housing construction can thus provide insight into the housing affordability crisis. This report forecasts monthly housing starts with three models: ETS, ARIMA, Regression with ARIMA errors. It first decomposes housing starts time series. Then it splits a time series of housing starts from the Census Bureau into a training set and a test set. A year was chosen as a cutoff. Observations before the cutoff year were assigned to the training set with the rest assigned to the test set. The training set was used to construct the models. Residuals and the Ljung-Box test results for each model are reported. Model accuracy is then predicted by comparing model predictions with the actual data in the test set. To account for the impact different splits have on the predicted model accuracy, models were constructed for a cutoff of 2006, 2012, 2018. The cutoffs created approximate train/test splits of 70/30, 80/20, 90/10. Lastly, the models are compared and then used to forecast housing starts two years into the future. 
+ 
+## Datasets 
+ 
+ Monthly housing starts are taken from the Census Bureau Survey of Construction (SOC). The SOC provides national and regional statistics on new residential construction. Housing starts are defined as the number of single family and multifamily units that started construction. The SOC defines starting construction as when excavation begins for the foundation of the building. The dataset records observations from January 1959 to March 2025. The US Bureau of Labor Statistics time series of seasonally adjusted monthly unemployment rate and producer price index for construction materials, the Federal Reserve time series on the monthly Federal Funds Effective Rate (Average of daily rate), and the S&P Case-Shiller index for national home prices were used as predictors for the regression model. The predictors for the regression model were retrieved from Federal Reserve Economic Data (FRED). 
+
+
+## Methodology
+
+### Train/Test Sets
+
+ The dataset on housing starts was divided into a training and test set. Three different years were used as cutoffs: 2006, 2012, 2018. These cutoffs resulted in an approximate 70/30, 80/20, 90/10 train/test split. This was done to account for the decline in housing starts during the recession. Models trained on data before the recession will likely fail to forecast the decline. While models trained on data after the crash but before the increase will likely fail to forecast the recovery in housing starts. Model accuracy will vary depending on the split. To record this impact, three splits corresponding to these  scenarios were created. 2006 is before the recession, 2012 before the recovery, 2018 after the recovery started.  
+
+### ETS/ARIMA Models
+
+ The parameters for the ETS model were calculated using the ETS function. Parameters for the ARIMA model were chosen with the ARIMA function with stepwise and approximation set to false in order to increase the number of models compared. Residual diagnostics for each model were created. A Ljung-Box test was also reported. No transformation was performed on the data as variation in housing starts did not vary as time increased. The model predictions were then compared with the test set. The RMSE, MAE, MAPE, MASE, RMSSE are calculated. Lastly, one year forecasts were created.
+
+
+### Regression with ARIMA errors
+
+ ARIMA errors are predicted with the ARIMA function. The following predictors were used: unemployment rate, federal funds effective rate, producer price index for construction, and the Case-Shiller index for national home prices. The unemployment rate was chosen to represent the state of the economy. Terrible economic conditions likely led to less homes being constructed and boom times led to more housing construction. Unemployment was chosen instead of GDP as it is recorded monthly instead of quarterly. This matches the housing start data. Federal funds rate corresponds with interest rates. Higher interest rates curb housing construction by increasing the costs of loans. PPI represents the cost to build a home. Case-Shiller represents change in total single family home prices. Higher prices incentivized home builders to build more. The predictors and housing starts were added to one csv file. The observation dates started in January 1959 and continued on to March 2025. Unfortunately, the Case-Shiller only includes data from 1987 to January 2025. Including the index decreases the size of the training set and possibly the accuracy of the model. For this reason, a regression was conducted without the Case-Shiller index and one with the index to be evaluated on the test set separately. In addition, a regression with the predictors lag by a month and a regression with the lagged predictors and the Case-Shiller index were constructed. Lagged predictors may be better at predictions since they are actually observed by home builders. The regression AICc are then compared. The best regression without the Case-Shiller index and the best regression with the Case-Shiller residuals were reported and then were evaluated with the test set. The RMSE, MAE, MAPE, MASE, RMSSE are calculated for both models.
+
+ To calculate the forecast of the two regression models, three scenarios for the predictors were chosen. It is hard to forecast the predictors. For this reason, extreme scenarios were chosen. This provides a wide range of potential outcomes. The first scenario, the predictors follow a drift model. This represented little change to the predictors. Second, unemployment rate, federal funds rate, and the producer price index decrease at a constant rate until they reach their recent minimum value. For lagged predictors, this meant the current month value or next month lagged value was the minimum value. The Case-Shiller index increased at a constant rate that matched its recent highest yearly increase. This represented a scenario where the predictors changed in a way associated with more housing starts. Third, the federal funds rate, the producer price index, and the Case-Shiller index increased at a constant rate until they reached their recent maximum value. Unemployment rate increased until its second largest recent value to avoid using the COVID outlier. This represented a scenario where the predictors changed in a way associated with less housing starts. Unfortunately, some NaN values were created, so the regression used to forecast future values lacked certian parameters.   
+
+
+```{r, Datasets, warning=FALSE, message=FALSE}
+setwd("~/Forecasting Work/Final Project")
+
+#install.packages("chron")
+#install.packages("urca")
+#install.packages("texreg")
+
+library(chron)
+options(chron.year.expand = 
+     function (y, cut.off = 26, century = c(1900, 2000), ...) {
+        chron:::year.expand(y, cut.off = cut.off, century = century, ...)
+     }
+)
+
+
+library(fpp3)
+library(urca)
+library(texreg)
+
+#Create data table with predictors (for Regression)
+Housing_data_Predictors <- read.csv("Predictors_Data.csv") %>%
+  filter(observation_date != "") %>% rename(FEDFUNDS_Lag = FEDFUNDS.1)
+
+Time_Series_Housing_Predictors <- Housing_data_Predictors %>%
+  mutate(observation_date = as.Date(chron(format(as.Date(observation_date, "%m/%d/%y"), "%m/%d/%y")))) %>%
+  mutate(observation_date = yearmonth(observation_date)) %>%
+  as_tsibble(index = observation_date) 
+
+
+#Open Housing data and create time series (for ETS and ARIMA)
+Housing_data <- read.csv("SeriesReport-202504191753.csv")
+Housing_data <- na.omit(Housing_data)
+
+Time_Series_Housing <- Housing_data %>%
+  mutate(Period = as.Date(chron(format(as.Date(Period, "%m/%d/%y"), "%m/%d/%y"))))  %>% 
+  mutate(Period = yearmonth(Period)) %>%
+  as_tsibble(index = Period) 
+
+```
+
+## Time Series Decomposition
+
+### Trend/Cycle
+
+```{r, Seasonality/Decomposition, warning=FALSE}
+#Checking for Seasonality and Decomposition
+
+autoplot(Time_Series_Housing, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+```
+
+The time series has no overall trend but it does show cyclical behavior. Most obviously, there is a peak around 2006 and 2007 before a drastic decline around 2008. This of course represents the housing bubble and the 2008 recession. 
+
+### Seasonality 
+
+```{r, warning=FALSE}
+Time_Series_Housing %>%
+  gg_subseries(Value) +
+  labs(y = "Units (thousands)",
+       title = "Seasonal plot: Privately-Owned Housing Units Started")
+
+
+Time_Series_Housing %>% ACF(Value, lag_max = 48) %>%  
+  autoplot() +
+  labs(title="Privately-Owned Housing Units Started")
+```
+
+ There is also clear seasonality. The seasonal subplots show more housing starts in the summer months than winter. Further, the ACF peaks every 12 months, a clear sign of seasonality. 
+
+### STL Decomposition 
+
+```{r, warning=FALSE}
+Time_Series_Housing %>%
+  model(
+    STL(Value ~ trend(window = 21) +
+                   season(window = "periodic"),
+    robust = TRUE))  %>%
+  components()  %>%
+  autoplot()
+```
+
+## Models
+
+### 80/20 Training/Test Set
+
+
+```{r, Training/Test, warning=FALSE}
+#Models for 80/20
+
+   #Create Training and Test sets (80/20)
+Training_Data <- Time_Series_Housing %>% filter(year(Period) <= 2011)
+Test_Data <- Time_Series_Housing %>% filter(year(Period) > 2011)
+
+Predictors_Train <- Time_Series_Housing_Predictors %>% filter(year(observation_date) <= 2011)
+Predictors_Test <-  Time_Series_Housing_Predictors %>% filter(year(observation_date) > 2011)
+
+Predictors_Train_CS <- Predictors_Train %>% filter(year(observation_date) > 1986)
+Predictors_Test_CS <-  Predictors_Test %>% 
+  filter(!row_number() %in% c(158, 159))
+
+
+Time_Series_Housing %>% ggplot(aes(x = Period, y = Value)) +
+  geom_line() + geom_vline(xintercept = as.numeric(as.Date("12/01/11", format = "%m/%d/%y")), color = "red") + annotate('rect', xmin = as.numeric(as.Date("01/01/59", format = "%m/%d/%y") - 100*365),  xmax=as.numeric(as.Date("12/01/11", format = "%m/%d/%y")), ymin=0, ymax=250, alpha=.2, fill="blue") + annotate('rect', xmin = as.numeric(as.Date("12/01/11", format = "%m/%d/%y")),  xmax=as.numeric(as.Date("3/01/25", format = "%m/%d/%y")), ymin=0, ymax=250, alpha=.2, fill="orange") + annotate('text', x = as.numeric(as.Date("10/01/84", format = "%m/%d/%y")), y = 20, size = 7, label = "Training Set") + annotate('text', x = as.numeric(as.Date("11/01/18", format = "%m/%d/%y")), y = 20, size = 7, label = "Test Set")
+ 
+  
+```
+
+#### ETS
+
+###### ETS Fit
+
+```{r, ETS,  warning=FALSE}
+   #ETS Model
+
+ETS_Model <- Training_Data %>% 
+  model(ETS(Value)) 
+
+ETS_Model %>% report(fit) %>% knitr::kable()
+
+augment(ETS_Model) %>% ggplot(aes(x = Period)) +
+  geom_line(aes(y = Value, colour = "Data")) +
+  geom_line(aes(y = .fitted, colour = "Fitted")) +
+   scale_colour_manual(
+    values = c(Data = "black", Fitted = "orange")) +
+  labs(y = "Units (in Thousands)",
+       title = "Privately-Owned Housing Units Started") + 
+   theme(plot.title = element_text(hjust=0.5)) +
+  guides(colour = guide_legend(title = "Series"))
+
+```
+
+The ETS function selected a multiplicative error, additive damped trend, and multiplicative seasonal component. Beta is close to zero which corresponds to the lack of a trend in the dataset. 
+
+
+##### Residuals
+
+```{r, ETS_Resd, warning=FALSE}
+  #Residuals
+ETS_Model %>% gg_tsresiduals() 
+
+ETS_Model %>% augment() %>% features(.innov, ljung_box, lag = 24) %>% as.data.frame() %>% 
+knitr::kable()
+
+```
+
+The residuals are normally distributed around zero. There are clear spikes in the residuals but no overall trend. Prediction intervals may be robust. The autocorrelation of the residuals however does not resemble white noise. The Ljung-Box test clearly shows significance. The model does not include all relevant information and can be improved. 
+
+
+##### Test Set Evaluation
+```{r, Accuracy_ETS_Test, warning=FALSE}
+  #Accuracy 
+ETS_Model %>% forecast(h = 87) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+ 
+
+``` 
+
+The model is very inaccurate. It fails to see the increase in housing starts. This is likely because it values more recent observations. Starting at the recession low points thus biases the predictions.
+
+#### ARIMA
+
+##### ARIMA Fit
+
+```{r, ARIMA}
+#ARIMA Model and Residuals/Accuracy 
+
+    #Model
+ARIMA_Model <- Training_Data %>% model(ARIMA(Value, stepwise = FALSE, approximation = FALSE))
+
+ARIMA_Model %>%  
+  report(fit) %>% knitr::kable()
+
+augment(ARIMA_Model) %>% ggplot(aes(x = Period)) +
+  geom_line(aes(y = Value, colour = "Data")) +
+  geom_line(aes(y = .fitted, colour = "Fitted")) +
+   scale_colour_manual(
+    values = c(Data = "black", Fitted = "orange")) +
+  labs(y = "Units (in Thousands)",
+       title = "Privately-Owned Housing Units Started") + 
+   theme(plot.title = element_text(hjust=0.5)) +
+  guides(colour = guide_legend(title = "Series"))
+
+```
+
+The ARIMA model includes a seasonal component. The seasonal component does not include auto regression. It is seasonally differenced.
+
+##### Residuals
+
+```{r, ARIMA_Resd, warning=FALSE}
+   #Residuals
+ARIMA_Model %>% gg_tsresiduals() 
+
+ARIMA_Model %>% augment() %>% features(.innov, ljung_box, dof = 3, lag = 24) %>% 
+knitr::kable()
+
+```
+
+The residuals are normally distributed around zero. There are clear spikes in the residuals but no overall trend. Prediction intervals may be robust. The autocorrelation of the residuals however does not resemble white noise. The Ljung-Box test clearly shows significance. The model does not include all relevant information and can be improved.
+
+
+##### Test Set Evaluation
+
+```{r, Accuracy_ARIMA_Test, warning=FALSE}
+   #Accuracy 
+ARIMA_Model %>% forecast(h = 171) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+
+ARIMA somewhat predicts the recovery but it still underperforms. It could not predict the extent of the increase.
+  
+
+#### Regression with ARIMA Errors
+
+##### Regression Fit
+
+```{r, Regression, warning=FALSE, warning=FALSE}
+#Regression with ARIMA Errors
+
+Reg_1 <- Predictors_Train %>% model(ARIMA(Value ~ UNRATE  +
+                                          FEDFUNDS + PPI_Construction + pdq()))
+
+Reg_Lag <- Predictors_Train %>% model(ARIMA(Value ~ UNRATE_Lag + FEDFUNDS_Lag +
+                                              PPI_Construction_Lag + pdq()))
+
+
+Reg_1_CS <- Predictors_Train_CS %>% model(ARIMA(Value ~ UNRATE  +
+                                          FEDFUNDS + PPI_Construction + Case.Shiller +
+                                            pdq()))
+
+Reg_Lag_CS <- Predictors_Train_CS %>% model(ARIMA(Value ~ UNRATE_Lag + FEDFUNDS_Lag +
+                                              PPI_Construction_Lag + Case.Shiller + pdq()))
+
+
+
+screenreg(list(Reg_1, Reg_Lag, Reg_1_CS, Reg_Lag_CS))
+
+```
+
+The best models were the regressions with lag. The best overall model was the regression with Case-Shiller. 
+
+```{r, ChosenReg, warning=FALSE}
+
+augment(Reg_1) %>% ggplot(aes(x = observation_date)) +
+  geom_line(aes(y = Value, colour = "Data")) +
+  geom_line(aes(y = .fitted, colour = "Fitted")) +
+   scale_colour_manual(
+    values = c(Data = "black", Fitted = "orange")) +
+  labs(y = "Units (in Thousands)",
+       title = "Privately-Owned Housing Units Started No Case-Shiller") + 
+   theme(plot.title = element_text(hjust=0.5)) +
+  guides(colour = guide_legend(title = "Series"))
+
+
+augment(Reg_Lag_CS) %>% ggplot(aes(x = observation_date)) +
+  geom_line(aes(y = Value, colour = "Data")) +
+  geom_line(aes(y = .fitted, colour = "Fitted")) +
+   scale_colour_manual(
+    values = c(Data = "black", Fitted = "orange")) +
+  labs(y = "Units (in Thousands)",
+       title = "Privately-Owned Housing Units Started w/ Case-Shiller") + 
+   theme(plot.title = element_text(hjust=0.5)) +
+  guides(colour = guide_legend(title = "Series"))
+
+```
+
+##### Residuals
+
+```{r, Reg_Residuals, warning=FALSE}
+  #Residuals of Selected Models 
+    
+Reg_Lag %>% gg_tsresiduals()
+
+augment(Reg_Lag) %>%
+  features(.innov, ljung_box, dof = 3, lag = 24) %>% 
+knitr::kable()
+
+
+Reg_Lag_CS %>% gg_tsresiduals()
+
+
+augment(Reg_Lag_CS) %>%
+  features(.innov, ljung_box, dof = 3, lag = 24) %>% 
+knitr::kable()
+
+```
+
+Both regression have normally distributed residuals around zero. There are clear spikes in the residuals but no overall trend for the regression without Case-Shiller. There is a sudden spike in residuals in the second regression. Unlike the regression without Case-Shiller, the second regression's ACF does ressemble white noise. The Ljung-Box test shows no significance. 
+
+##### Test Set Evaluation 
+
+```{r, Reg_Test_Fit, warning=FALSE}
+  #Accuracy of Selected Models
+
+forecast(Reg_Lag, Predictors_Test) %>% autoplot(Predictors_Train) + 
+  autolayer(Predictors_Test, Value) +
+ labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+
+forecast(Reg_Lag_CS, Predictors_Test_CS) %>% autoplot(Predictors_Train_CS) + 
+  autolayer(Predictors_Test_CS, Value) +
+ labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+The regression without Case-Shiller starts accurately predicting the outcomes but begins to show a decrease when they should be a increase. The second regression is much more accurate.
+
+
+
+```{r, DriftReg, warning=FALSE}
+#Forecast
+
+   #Drift Scenario 
+Future_UNRATE_Lag <- Time_Series_Housing_Predictors %>% model(RW(UNRATE_Lag ~ drift())) %>% 
+  forecast(h = 24)
+
+Future_FEDFUNDS_Lag <- Time_Series_Housing_Predictors %>% model(RW(FEDFUNDS_Lag ~ drift())) %>% 
+  forecast(h = 24)
+
+Future_PPI_Lag <- Time_Series_Housing_Predictors %>% model(RW(PPI_Construction_Lag ~ drift())) %>% 
+  forecast(h = 24)
+
+Future_CS <- Predictors_Test_CS %>% model(RW(Case.Shiller ~ drift())) %>% 
+  forecast(h = 26)
+
+```
+
+```{r, Lag_Update,  warning=FALSE}
+Future_UNRATE_Lag$.mean[1] <- Time_Series_Housing_Predictors$UNRATE[795]
+Future_FEDFUNDS_Lag$.mean[1] <- Time_Series_Housing_Predictors$FEDFUNDS[795]
+Future_PPI_Lag$.mean[1] <- Time_Series_Housing_Predictors$PPI_Construction[795]
+```
+
+```{r, ForecastRegScenarios,  warning=FALSE}
+  #Decrease Scenario 
+
+Future_Decr <- as.data.frame(matrix(nrow = 24, ncol = 4, byrow = FALSE))
+colnames(Future_Decr) <-  c("UNRATE_Lag", "FEDFUNDS_Lag", "PPI_Lag", "CS") 
+
+  for (i in 0:23){
+    x <- i + 1
+    Future_Decr$UNRATE_Lag[x] <- Time_Series_Housing_Predictors$UNRATE[795] + (0.2416666666667 * i)
+    Future_Decr$FEDFUNDS_Lag[x] <- Time_Series_Housing_Predictors$FEDFUNDS[795] + (0.09083333335 * i)
+    Future_Decr$PPI_Lag[x] <- Time_Series_Housing_Predictors$PPI_Construction[795] + (0.623375 * i)
+    Future_Decr$CS[x] <- (Time_Series_Housing_Predictors$Case.Shiller[793] - 0.9085714286 * 2) - (0.4542857143 * i)
+  }
+
+  #Increase Scenario
+
+Future_Incr <- as.data.frame(matrix(nrow = 24, ncol = 4, byrow = FALSE))
+colnames(Future_Incr) <-  c("UNRATE_Lag", "FEDFUNDS_Lag", "PPI_Lag", "CS") 
+
+  for (i in 0:23){
+    x <- i + 1
+    Future_Incr$UNRATE_Lag[x] <- Time_Series_Housing_Predictors$UNRATE[795] - (0.025 * i)
+    Future_Incr$FEDFUNDS_Lag[x] <- Time_Series_Housing_Predictors$FEDFUNDS[795] - (0.1775 * i)
+    Future_Incr$PPI_Lag[x] <- Time_Series_Housing_Predictors$PPI_Construction[795] - (0.9065 * i)
+    Future_Incr$CS[x] <- (Time_Series_Housing_Predictors$Case.Shiller[793] + (0.811 * 2)) - 0.4055 * i
+  }
+
+  
+ #Creating Future Scenarios
+future_scenarios <- scenarios(
+  Increase = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_Incr$UNRATE_Lag, 
+           FEDFUNDS_Lag = Future_Incr$FEDFUNDS_Lag, 
+           PPI_Construction_Lag = Future_Incr$PPI_Lag),
+  Drift = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_UNRATE_Lag$.mean, 
+           FEDFUNDS_Lag = Future_FEDFUNDS_Lag$.mean, 
+           PPI_Construction_Lag = Future_PPI_Lag$.mean),
+  Decrease = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_Decr$UNRATE_Lag, 
+           FEDFUNDS_Lag = Future_Decr$FEDFUNDS_Lag, 
+           PPI_Construction_Lag = Future_Decr$PPI_Lag),
+  names_to = "Scenario")
+
+
+
+
+future_scenarios_CS <- scenarios(
+  Increase = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_Incr$UNRATE_Lag, 
+           FEDFUNDS_Lag = Future_Incr$FEDFUNDS_Lag, 
+           PPI_Construction_Lag = Future_Incr$PPI_Lag, 
+           Case.Shiller = Future_Incr$CS),
+  Drift = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_UNRATE_Lag$.mean, 
+           FEDFUNDS_Lag = Future_FEDFUNDS_Lag$.mean, 
+           PPI_Construction_Lag = Future_PPI_Lag$.mean, 
+           Case.Shiller = Future_CS$.mean[3:26]),
+  Decrease = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_Decr$UNRATE_Lag, 
+           FEDFUNDS_Lag = Future_Decr$FEDFUNDS_Lag, 
+           PPI_Construction_Lag = Future_Decr$PPI_Lag, 
+           Case.Shiller = Future_Decr$CS),
+  names_to = "Scenario")
+
+```
+
+#### Model Accuracy 
+
+```{r, Accuracy, warning=FALSE}
+
+knitr::kable(bind_rows(
+    ETS_Model %>% accuracy(),
+    ETS_Model %>% forecast(h = 171) %>% accuracy(Time_Series_Housing),
+    ARIMA_Model %>% accuracy(),
+    ARIMA_Model %>% forecast(h = 171) %>% accuracy(Time_Series_Housing),
+    Reg_Lag %>% accuracy(),
+    Reg_Lag %>% forecast(Predictors_Test) %>% accuracy(Time_Series_Housing_Predictors),
+    Reg_Lag_CS %>% accuracy(),
+    Reg_Lag_CS %>% forecast(Predictors_Test_CS) %>% accuracy(Time_Series_Housing_Predictors)
+    ) %>% select(-ME, -MPE, -ACF1))
+
+```
+
+The best model is the regression with lagged predictors and Case-Shiller. The second best model is ARIMA. Interestingly, the ARIMA and regression without Case-Shiller have similar training errors but quite different test set errors. ARIMA performs better compared to the regression. 
+
+#### Two Year Forecast
+
+```{r, ETS_Forecast, warning=FALSE}
+
+#Forecast 1 Year
+Time_Series_Housing %>% 
+  model(ETS(Value)) %>% 
+  forecast(h = 24)  %>% 
+  autoplot(Time_Series_Housing) + labs(title = "Privately-Owned Housing Units Started ETS 2 Yrs Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+```{r, ARIMA_Forecast, echo=FALSE, warning=FALSE}
+Time_Series_Housing %>% 
+  model(ARIMA(Value ~ pdq(1, 0, 1) + PDQ(0, 1, 1))) %>% 
+  forecast(h = 24)  %>% 
+  autoplot(Time_Series_Housing) + labs(title = "Privately-Owned Housing Units Started ARIMA 2 Yrs Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+```{r, Reg_Forecast, warning=FALSE}
+Reg_Lag_Forecast  <- Time_Series_Housing_Predictors %>% model(ARIMA(Value ~ UNRATE_Lag + FEDFUNDS_Lag + PPI_Construction_Lag + pdq()))
+
+#coef(report(Reg_Lag_Forecast)), Above model produces NAN for Sar1, Sar2, sma1, sma2 for 90/10 and 70/30
+
+Reg_Lag_CS_Forecast <- Time_Series_Housing_Predictors %>% model(ARIMA(Value ~ UNRATE_Lag + FEDFUNDS_Lag + PPI_Construction_Lag + Case.Shiller + pdq()))
+
+RegForecast <- forecast(Reg_Lag_Forecast, new_data = future_scenarios)
+CS_RegForecast <- forecast(Reg_Lag_CS_Forecast, new_data = future_scenarios_CS)
+
+
+Time_Series_Housing_Predictors %>% 
+  autoplot(Value) +
+  autolayer(RegForecast) + labs(title = "Privately-Owned Housing Units Started Regression1 1 Yr Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+
+Time_Series_Housing_Predictors %>% 
+  autoplot(Value) +
+  autolayer(CS_RegForecast) + labs(title = "Privately-Owned Housing Units Started Regression2 1 Yr Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+
+### 90/10 Training/Test Set
+
+```{r, Test/Train2, warning=FALSE}
+
+   #Create Training and Test sets (90/10)
+Training_Data <- Time_Series_Housing %>% filter(year(Period) < 2018)
+Test_Data <- Time_Series_Housing %>% filter(year(Period) >= 2018)
+
+Predictors_Train <- Time_Series_Housing_Predictors %>% filter(year(observation_date) < 2018)
+Predictors_Test <-  Time_Series_Housing_Predictors %>% filter(year(observation_date) >= 2018)
+
+Predictors_Train_CS <- Predictors_Train %>% filter(year(observation_date) > 1986)
+Predictors_Test_CS <-  Predictors_Test %>% 
+  filter(!row_number() %in% c(86, 87))
+
+```
+
+```{r, include=FALSE}
+Time_Series_Housing %>% ggplot(aes(x = Period, y = Value)) +
+  geom_line() + geom_vline(xintercept = as.numeric(as.Date("12/01/17", format = "%m/%d/%y")), color = "red") + annotate('rect', xmin = as.numeric(as.Date("01/01/59", format = "%m/%d/%y") - 100*365),  xmax=as.numeric(as.Date("12/01/17", format = "%m/%d/%y")), ymin=0, ymax=250, alpha=.2, fill="blue") + annotate('rect', xmin = as.numeric(as.Date("12/01/17", format = "%m/%d/%y")),  xmax=as.numeric(as.Date("3/01/25", format = "%m/%d/%y")), ymin=0, ymax=250, alpha=.2, fill="orange") + annotate('text', x = as.numeric(as.Date("10/01/84", format = "%m/%d/%y")), y = 20, size = 7, label = "Training Set")
+```
+
+#### ETS
+
+##### ETS Fit
+
+```{r, warning=FALSE}
+<<ETS>>
+```
+
+The ETS function selected a multiplicative error, additive damped trend, and multiplicative seasonal component. Beta is close to zero which corresponds to the lack of a trend in the dataset. The gamma is larger than in the 80/20 split. The model weighs more recent observation seasonality more.
+
+
+##### Residuals
+
+```{r, warning=FALSE}
+
+<<ETS_Resd>>
+
+```
+
+The residuals are normally distributed around zero. There are clear spikes in the residuals but no overall trend. Prediction intervals may be robust. The autocorrelation of the residuals however does not resemble white noise. The Ljung-Box test clearly shows significance. The model does not include all relevant information and can be improved. 
+
+##### Test Set Evaluation 
+
+```{r, warning=FALSE}
+#Accuracy 
+ETS_Model %>% forecast(h = 87) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+The model consistently under predicts the test set values but it performs better than the ETS model created with a 90/10 split.
+
+#### ARIMA
+
+##### ARIMA Fit
+
+```{r, warning=FALSE}
+<<ARIMA>>
+```
+
+The model has seasonal differencing. Interestingly, it is a autoregression with a order of three with no moving averages in the non seasonal part of the model.   
+
+##### Residuals
+
+```{r, warning=FALSE}
+<<ARIMA_Resd>>
+```
+
+The residuals are normally distributed around zero. There are clear spikes in the residuals but no overall trend. Prediction intervals may be robust. The autocorrelation of the residuals however does not resemble white noise. The Ljung-Box test clearly shows significance. The model does not include all relevant information and can be improved. 
+
+##### Test Set Evaluation 
+
+```{r, warning=FALSE}
+  #Accuracy 
+ARIMA_Model %>% forecast(h = 87) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+```
+
+The model is similar to the previous ARIMA regression. It also underpredicts the test values. However it performs better than the previous model. 
+
+```{r, warning=FALSE}
+<<DriftReg>>
+<<Lag_Update>>
+
+```
+
+```{r, warning=FALSE}
+ARIMA_Model %>% forecast(h = 87) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+```
+
+It under predicts the test set values but it does better than the ARIMA model constructed with a 80/20 split. 
+
+#### Regression with ARIMA Errors
+
+##### Regression Fit
+
+```{r, warning=FALSE}
+<<Regression>>
+```
+
+The best models were the regressions with lag. The best overall model was the regression with Case-Shiller.
+
+##### Residuals
+
+```{r, warning=FALSE}
+<<Reg_Residuals>>
+```
+
+Both regression have normally distributed residuals around zero and have no overall trend.  Unlike the regression without Case-Shiller, the second regression's ACF does ressemble white noise. The Ljung-Box test shows no significance.
+
+##### Test Set Evaluation
+
+```{r, warning=FALSE}
+<<Reg_Test_Fit>>
+```
+
+Once again, the regression with Case-Shiller performs better. The first regression predicts a downtrend which is not seen in the data. 
+
+#### Model Accuracy 
+
+```{r, warning=FALSE}
+knitr::kable(bind_rows(
+    ETS_Model %>% accuracy(),
+    ETS_Model %>% forecast(h = 87) %>% accuracy(Time_Series_Housing),
+    ARIMA_Model %>% accuracy(),
+    ARIMA_Model %>% forecast(h = 87) %>% accuracy(Time_Series_Housing), 
+    Reg_Lag %>% accuracy(),
+    Reg_Lag %>% forecast(Predictors_Test) %>% accuracy(Time_Series_Housing_Predictors), 
+    Reg_Lag_CS %>% accuracy(),
+    Reg_Lag_CS %>% forecast(Predictors_Test_CS) %>% accuracy(Time_Series_Housing_Predictors)
+    ) %>% select(-ME, -MPE, -ACF1))
+```
+
+The best model was the regression with lagged predictors and Case-Shiller. All of the models performed better on this test set compared to the 80/20 split.
+
+
+#### Two Year Forecasts
+
+```{r, warning=FALSE}
+<<ETS_Forecast>>
+
+Time_Series_Housing %>% 
+  model(ARIMA(Value ~ pdq(3, 0, 0) + PDQ(1, 1, 1))) %>% 
+  forecast(h = 24)  %>% 
+  autoplot(Time_Series_Housing) + labs(title = "Privately-Owned Housing Units Started ARIMA 1 Yr Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+<<ForecastRegScenarios>>
+<<Reg_Forecast>>
+```
+
+
+## 70/30 Training/Test Set
+
+```{r, Test/Train3, warning=FALSE}
+#Models for 70/30
+
+   #Create Training and Test sets (70/30)
+Training_Data <- Time_Series_Housing %>% filter(year(Period) < 2006)
+Test_Data <- Time_Series_Housing %>% filter(year(Period) >= 2006)
+
+Predictors_Train <- Time_Series_Housing_Predictors %>% filter(year(observation_date) < 2006)
+Predictors_Test <-  Time_Series_Housing_Predictors %>% filter(year(observation_date) >= 2006)
+
+Predictors_Train_CS <- Predictors_Train %>% filter(year(observation_date) > 1986)
+Predictors_Test_CS <-  Predictors_Test %>% 
+  filter(!row_number() %in% c(230, 231))
+
+```
+
+```{r, warning=FALSE}
+Time_Series_Housing %>% ggplot(aes(x = Period, y = Value)) +
+  geom_line() + geom_vline(xintercept = as.numeric(as.Date("12/01/05", format = "%m/%d/%y")), color = "red") + annotate('rect', xmin = as.numeric(as.Date("01/01/59", format = "%m/%d/%y") - 100*365),  xmax=as.numeric(as.Date("12/01/05", format = "%m/%d/%y")), ymin=0, ymax=250, alpha=.2, fill="blue") + annotate('rect', xmin = as.numeric(as.Date("12/01/05", format = "%m/%d/%y")),  xmax=as.numeric(as.Date("3/01/25", format = "%m/%d/%y")), ymin=0, ymax=250, alpha=.2, fill="orange") + annotate('text', x = as.numeric(as.Date("10/01/84", format = "%m/%d/%y")), y = 20, size = 7, label = "Training Set") + annotate('text', x = as.numeric(as.Date("11/01/15", format = "%m/%d/%y")), y = 20, size = 7, label = "Test Set")
+
+```
+
+#### ETS
+
+##### ETS Fit
+```{r, warning=FALSE}
+<<ETS>>
+```
+
+The ETS function selected a additive error, no trend component, and a additive seasonal component. The gamma term is similar to the ETS model for the 80/20 split. Alpha is around the same value as the last two splits.   
+
+##### Residuals
+```{r, warning=FALSE}
+<<ETS_Resd>>
+```
+
+The residuals are normally distributed around zero. There are clear spikes in the residuals but no overall trend. Prediction intervals may be robust. The autocorrelation of the residuals however does not resemble white noise. The Ljung-Box test clearly shows significance. The model does not include all relevant information and can be improved. 
+
+##### Test set Evaluation
+
+```{r,  warning=FALSE}
+#Accuracy 
+ETS_Model %>% forecast(h = 231) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+```
+
+The ETS model completely misses the decline caused by the recession. It predicts a constant trend due to the lack of a trend component. 
+
+#### ARIMA
+
+##### ARIMA Fit
+
+```{r, warning=FALSE}
+<<ARIMA>>
+```
+
+The ARIMA model has seasonal differencing. There is no moving average component in the seasonal part.
+
+##### Residuals
+
+```{r, warning=FALSE}
+<<ARIMA_Resd>>
+```
+
+The residuals are normally distributed around zero. There are clear spikes in the residuals. There is a especially large residual around January 1980. However, there is no overall trend. Prediction intervals may be robust. The autocorrelation of the residuals however does not resemble white noise. The Ljung-Box test clearly shows significance. The model does not include all relevant information and can be improved. 
+
+##### Test Set Evaluation 
+
+```{r, warning=FALSE}
+#Accuracy 
+ARIMA_Model %>% forecast(h = 231) %>% autoplot(Training_Data) +
+  autolayer(Test_Data, Value) + labs(title = "Privately-Owned Housing Units Started", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+```
+
+ARIMA performs slightly better than ETS. However, it still fails to predict the decline during the recession. 
+
+#### Regression with ARIMA Errors
+
+##### Regression Fit
+
+```{r, warning=FALSE}
+<<Regression>>
+```
+
+The best model were the regression with lag and the regression without lag for Case-Shiller. The latter model also performed the best. 
+
+##### Residuals
+
+
+```{r, warning=FALSE}
+#Best model = Reg_1_CS, eaiser to redefine and then rerun code chuck
+Reg_Lag_CS <- Reg_1_CS
+
+<<Reg_Residuals>>
+```
+
+Both regression have normally distributed residuals around zero. The case-shiller regression has many spikes. Unlike the regression without Case-Shiller, the second regression's ACF does resemble white noise. The Ljung-Box test shows no significance.
+
+##### Test Set Evaluation
+```{r, warning=FALSE}
+<<Reg_Test_Fit>>
+```
+
+The first regression missed the decline in housing starts caused by the recession. The second regression predicted the decline and recovery. However, it has much larger prediction intervals.
+
+### Model Accuracy
+```{r, warning=FALSE}
+knitr::kable(bind_rows(
+    ETS_Model %>% accuracy(),
+    ETS_Model %>% forecast(h = 87) %>% accuracy(Time_Series_Housing),
+    ARIMA_Model %>% accuracy(),
+    ARIMA_Model %>% forecast(h = 87) %>% accuracy(Time_Series_Housing), 
+    Reg_Lag %>% accuracy(),
+    Reg_Lag %>% forecast(Predictors_Test) %>% accuracy(Time_Series_Housing_Predictors), 
+    Reg_Lag_CS %>% accuracy(),
+    Reg_Lag_CS %>% forecast(Predictors_Test_CS) %>% accuracy(Time_Series_Housing_Predictors)
+    ) %>% select(-ME, -MPE, -ACF1))
+```
+
+The best model is the regression with Case-Shiller and no lagged predictors. All models performed worse at predicting this test set compared to the other spilts. 
+
+### Two Year Forecasts
+
+```{r, warning=FALSE}
+<<DriftReg>>
+
+#Forecast
+
+   #Drift Scenario CS no lag
+Future_UNRATE <- Time_Series_Housing_Predictors %>% model(RW(UNRATE ~ drift())) %>% 
+  forecast(h = 24)
+
+Future_FEDFUNDS <- Time_Series_Housing_Predictors %>% model(RW(FEDFUNDS ~ drift())) %>% 
+  forecast(h = 24)
+
+Future_PPI <- Time_Series_Housing_Predictors %>% model(RW(PPI_Construction ~ drift())) %>% 
+  forecast(h = 24)
+
+
+
+Future_Decr <- as.data.frame(matrix(nrow = 24, ncol = 4, byrow = FALSE))
+colnames(Future_Decr) <-  c("UNRATE_Lag", "FEDFUNDS_Lag", "PPI_Lag", "CS") 
+
+  for (i in 0:23){
+    x <- i + 1
+    Future_Decr$UNRATE_Lag[x] <- Time_Series_Housing_Predictors$UNRATE[795] + (0.2416666666667 * i)
+    Future_Decr$FEDFUNDS_Lag[x] <- Time_Series_Housing_Predictors$FEDFUNDS[795] + (0.09083333335 * i)
+    Future_Decr$PPI_Lag[x] <- Time_Series_Housing_Predictors$PPI_Construction[795] + (0.623375 * i)
+    Future_Decr$CS[x] <- (Time_Series_Housing_Predictors$Case.Shiller[793] - 0.9085714286 * 2) - (0.4542857143 * i)
+  }
+
+  #Increase Scenario
+
+Future_Incr <- as.data.frame(matrix(nrow = 24, ncol = 4, byrow = FALSE))
+colnames(Future_Incr) <-  c("UNRATE_Lag", "FEDFUNDS_Lag", "PPI_Lag", "CS") 
+
+  for (i in 0:23){
+    x <- i + 1
+    Future_Incr$UNRATE_Lag[x] <- Time_Series_Housing_Predictors$UNRATE[795] - (0.025 * i)
+    Future_Incr$FEDFUNDS_Lag[x] <- Time_Series_Housing_Predictors$FEDFUNDS[795] - (0.1775 * i)
+    Future_Incr$PPI_Lag[x] <- Time_Series_Housing_Predictors$PPI_Construction[795] - (0.9065 * i)
+    Future_Incr$CS[x] <- (Time_Series_Housing_Predictors$Case.Shiller[793] + (0.811 * 2)) - 0.4055 * i
+  }
+  
+ #Creating Future Scenarios
+future_scenarios <- scenarios(
+  Increase = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_Incr$UNRATE_Lag, 
+           FEDFUNDS_Lag = Future_Incr$FEDFUNDS_Lag, 
+           PPI_Construction_Lag = Future_Incr$PPI_Lag),
+  Drift = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_UNRATE_Lag$.mean, 
+           FEDFUNDS_Lag = Future_FEDFUNDS_Lag$.mean, 
+           PPI_Construction_Lag = Future_PPI_Lag$.mean),
+  Decrease = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE_Lag = Future_Decr$UNRATE_Lag, 
+           FEDFUNDS_Lag = Future_Decr$FEDFUNDS_Lag, 
+           PPI_Construction_Lag = Future_Decr$PPI_Lag),
+  names_to = "Scenario")
+
+
+#CS No Lag 
+
+ #Decrease Scenario 
+
+Future_Decr <- as.data.frame(matrix(nrow = 24, ncol = 4, byrow = FALSE))
+colnames(Future_Decr) <-  c("UNRATE", "FEDFUNDS", "PPI", "CS") 
+
+  for (i in 1:24){
+    Future_Decr$UNRATE[i] <- Time_Series_Housing_Predictors$UNRATE[795] + (0.2416666666667 * i)
+    Future_Decr$FEDFUNDS[i] <- Time_Series_Housing_Predictors$FEDFUNDS[795] + (0.09083333335 * i)
+    Future_Decr$PPI[i] <- Time_Series_Housing_Predictors$PPI_Construction[795] + (0.623375 * i)
+    Future_Decr$CS[i] <- (Time_Series_Housing_Predictors$Case.Shiller[793] - 0.9085714286 * 2) - (0.4542857143 * i)
+  
+  }
+
+  #Increase Scenario
+
+Future_Incr <- as.data.frame(matrix(nrow = 24, ncol = 4, byrow = FALSE))
+colnames(Future_Incr) <-  c("UNRATE", "FEDFUNDS", "PPI", "CS") 
+
+  for (i in 1:24){
+    Future_Incr$UNRATE[i] <- Time_Series_Housing_Predictors$UNRATE[795] - (0.025 * i)
+    Future_Incr$FEDFUNDS[i] <- Time_Series_Housing_Predictors$FEDFUNDS[795] - (0.1775 * i)
+    Future_Incr$PPI[i] <- Time_Series_Housing_Predictors$PPI_Construction[795] - (0.9065 * i)
+    Future_Incr$CS[i] <- (Time_Series_Housing_Predictors$Case.Shiller[793] + (0.811 * 2)) - 0.4055 * i
+  }
+
+future_scenarios_CS <- scenarios(
+  Increase = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE = Future_Incr$UNRATE, 
+           FEDFUNDS = Future_Incr$FEDFUNDS, 
+           PPI_Construction = Future_Incr$PPI, 
+           Case.Shiller = Future_Incr$CS),
+  Drift = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE = Future_UNRATE$.mean, 
+           FEDFUNDS = Future_FEDFUNDS$.mean, 
+           PPI_Construction = Future_PPI$.mean, 
+           Case.Shiller = Future_CS$.mean[3:26]),
+  Decrease = new_data(Time_Series_Housing_Predictors, 24) %>%
+    mutate(UNRATE = Future_Decr$UNRATE, 
+           FEDFUNDS = Future_Decr$FEDFUNDS, 
+           PPI_Construction = Future_Decr$PPI, 
+           Case.Shiller = Future_Decr$CS),
+  names_to = "Scenario")
+
+
+<<ETS_Forecast>>
+
+Time_Series_Housing %>% 
+  model(ARIMA(Value ~ pdq(2, 0, 2) + PDQ(2, 1, 0))) %>% 
+  forecast(h = 24)  %>% 
+  autoplot(Time_Series_Housing) + labs(title = "Privately-Owned Housing Units Started ARIMA 1 Yr Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+
+#Reg Forecast
+
+Reg_Lag_Forecast  <- Time_Series_Housing_Predictors %>% model(ARIMA(Value ~ UNRATE_Lag + FEDFUNDS_Lag + PPI_Construction_Lag + pdq()))
+
+#coef(report(Reg_Lag_Forecast)), Above model produces NAN for Sar1, Sar2, sma1, sma2 for 90/10 and 70/30
+
+Reg_Lag_CS_Forecast <- Time_Series_Housing_Predictors %>% model(ARIMA(Value ~ UNRATE + FEDFUNDS + PPI_Construction + Case.Shiller + pdq()))
+
+RegForecast <- forecast(Reg_Lag_Forecast, new_data = future_scenarios)
+CS_RegForecast <- forecast(Reg_Lag_CS_Forecast, new_data = future_scenarios_CS)
+
+
+Time_Series_Housing_Predictors %>% 
+  autoplot(Value) +
+  autolayer(RegForecast) + labs(title = "Privately-Owned Housing Units Started Regression No Case-Shiller 2 Yrs Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+
+Time_Series_Housing_Predictors %>% 
+  autoplot(Value) +
+  autolayer(CS_RegForecast) + labs(title = "Privately-Owned Housing Units Started Regression w/ Case-Shiller 2 Yrs Forecast", y = "Units (in Thousands)") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+## Conclusion
+
+The best model in all of the training/test splits was the regression that included the Case-Shiller index. The Ljung-Box test for all the other models suggested the ACF of residuals were not white noise and were consequently were missing key information. The only models to not show significance were the regression with Case-Shiller. It is possible the missing information was home prices. This make intuitive sense, home builders are concerned with profit. While the regression with Case-Shiller performed well, it still struggled with predicting the decline in housing starts during the recession. All of the models struggled predicting extreme events. This is why models train on data which included the decline and recovery (90/10) had less error. In any case, the best models at forecasting housing starts were regression which included data on home prices. Housing prices thus is a key predictor for any future forecasts of housing construction.             
